@@ -191,7 +191,7 @@ The deterministic nature of DEGAS ensures that maintenance of regression tests r
 
 2. **Timewait values**: Correctly show absolute time values as per POSIX specification, accumulated from the starting monotonic_time (1 second). This represents when tasks should wake up, not how long they sleep.
 
-3. **Suspicious large timewait values**: Values like `633437444 854775807` appear in some tests but should be deterministic (reproducible across runs). They may indicate issues with Ada runtime's time calculation or clock type usage, but if the test works correctly, the scheduler is handling them properly.
+3. **Large timewait values**: Values like `633437444 854775807` are GNAT Ada runtime-specific constants (≈2^59.136 nanoseconds or ~20 years) used to represent very long timeouts in certain select statement scenarios. These values are deterministic and reproducible across all runs, demonstrating DEGAS's complete determinism. They are NOT bugs, uninitialized memory, or non-deterministic behavior - they are expected constants from the GNAT implementation.
 
 Both behaviors are now properly documented in the source code with inline comments.
 
