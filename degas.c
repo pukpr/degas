@@ -71,6 +71,9 @@ int numActiveCntxts = 0;            /* The number of active Cntxts */
 /* The number of waiting Cntxts.  When this equals numActiveCntxts the scheduler
    will move time forward to the Cntxt with minimum wait time. */
 int numWaitingCntxts = 0;
+int livelockCounter = 0;            /* Counts consecutive yields without progress */
+#define LIVELOCK_THRESHOLD 100      /* Max yields before checking for deadlock */
+#define NSEC_PER_SEC 1000000000     /* Nanoseconds per second */
 
 typedef struct {
   void * KA[MAX_THREADS];
@@ -84,6 +87,10 @@ void Scheduler_init(void) {
     initializedScheduler = 1;
     debug = getenv(SIM_CONTEXT_DEBUG) != 0;
     if (debug) printf("%i : %s\n", debug, SIM_CONTEXT_DEBUG);
+
+    /* Initialize monotonic time to 1 second to mimic the effect of delay 1.0 */
+    monotonic_time.tv_sec = 1;
+    monotonic_time.tv_nsec = 0;
 
     /* the internal scheduler has an extra active context */
     if (numActiveCntxts == 0) numActiveCntxts = 1;  /* The main program is active */
@@ -207,6 +214,7 @@ void cntxtYield() {
   size_t lastCntxt = currentCntxt;
   int i;
   int found = 0;
+  struct timespec savedTime = monotonic_time;
 
   // 1. Try to find the next ready task in round-robin fashion
   for (i = 1; i <= numCntxts + 1; i++) {
@@ -228,6 +236,7 @@ void cntxtYield() {
      if (nextTimer != -1 && lessThan(&monotonic_time, &cntxtList[nextTimer].wait)) {
         monotonic_time = cntxtList[nextTimer].wait;
         printDebug("! YIELD-ADV", (int)currentCntxt, (int)monotonic_time.tv_sec);
+        livelockCounter = 0;  // Reset counter when we advance time
         // We stay in the current thread for this slice, or we could switch.
         // Let's switch to be fair.
         currentCntxt = (size_t)nextTimer;
@@ -251,14 +260,53 @@ void cntxtYield() {
     printDebug("! SCHEDULE", (int)currentCntxt, (int)monotonic_time.tv_sec);
     if (cntxtList[currentCntxt].waiter) {
       if (lessThan(&monotonic_time, &cntxtList[currentCntxt].wait)) {
+         // Check if we're trying to advance to max_time (infinite wait)
+         // This indicates a deadlock where all tasks are blocked indefinitely
+         if (!lessThan(&cntxtList[currentCntxt].wait, &max_time)) {
+            printf("EXIT, global deadlock detected (all tasks waiting indefinitely)\n");
+            exit(1);
+         }
          monotonic_time = cntxtList[currentCntxt].wait;
          cntxtList[currentCntxt].timed_out = 1;
+         livelockCounter = 0;  // Reset counter when we advance time
       } else {
          cntxtList[currentCntxt].timed_out = 0;
       }
       cntxtList[currentCntxt].waiter = 0;
     }
   }
+
+  // 4. Detect livelock: if we keep yielding without advancing time
+  if (savedTime.tv_sec == monotonic_time.tv_sec && savedTime.tv_nsec == monotonic_time.tv_nsec) {
+     livelockCounter++;
+     if (livelockCounter >= LIVELOCK_THRESHOLD) {
+        // We've been switching contexts many times without advancing time
+        // Advance time and wake waiters to break SPINLOCK deadlocks
+        printDebug("! LIVELOCK-ADV", (int)currentCntxt, livelockCounter);
+
+        // Advance time by a small amount
+        monotonic_time.tv_nsec += 1;
+        if (monotonic_time.tv_nsec >= NSEC_PER_SEC) {
+           monotonic_time.tv_sec++;
+           monotonic_time.tv_nsec -= NSEC_PER_SEC;
+        }
+
+        // Wake up waiting contexts by clearing their waiter flags
+        // This allows pthread_cond_wait to exit via the releaseContext() check
+        int i;
+        for (i = 0; i < numCntxts + 1; i++) {
+           if (cntxtList[i].waiter && !cntxtList[i].finished) {
+              cntxtList[i].waiter = 0;
+           }
+        }
+
+        // Reset counter
+        livelockCounter = 0;
+     }
+  } else {
+     livelockCounter = 0;  // Reset counter when time advances
+  }
+
   printDebug("#sw", (int)lastCntxt, (int)currentCntxt);
 
   if (lastCntxt != currentCntxt) {
@@ -625,7 +673,7 @@ int pthread_cond_wait (pthread_cond_t *__restrict __cond,
   holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
   pthread_mutex_unlock(__mutex);
-  while (SPINLOCK != 0) {
+  while (SPINLOCK != 0 && !releaseContext()) {
     sched_yield();
   }
   decrWaitingCntxt();
