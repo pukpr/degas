@@ -90,6 +90,94 @@ typedef struct {
 
 KeyAddress addresses[MAX_THREAD_KEYS];
 
+/* Forward declaration for debug printing */
+void PrintDebug(char * msg, int v1, int v2);
+#define printDebug(A,B,C)  PrintDebug(A,B,C)
+
+/* Waiter queue for condition variables - supports multiple waiters per CV */
+#define MAX_CVS 100
+#define MAX_WAITERS_PER_CV 10
+
+typedef struct {
+  pthread_cond_t *cv_ptr;     /* Pointer to the condition variable */
+  int waiters[MAX_WAITERS_PER_CV]; /* Array of waiting context IDs */
+  int num_waiters;            /* Number of waiters in the queue */
+} CVWaiterQueue;
+
+CVWaiterQueue cv_queues[MAX_CVS];
+int num_cv_queues = 0;
+
+/* Find or create a waiter queue for a condition variable */
+CVWaiterQueue* get_cv_queue(pthread_cond_t *cv) {
+  int i;
+  /* Search for existing queue */
+  for (i = 0; i < num_cv_queues; i++) {
+    if (cv_queues[i].cv_ptr == cv) {
+      return &cv_queues[i];
+    }
+  }
+  /* Create new queue */
+  if (num_cv_queues < MAX_CVS) {
+    cv_queues[num_cv_queues].cv_ptr = cv;
+    cv_queues[num_cv_queues].num_waiters = 0;
+    num_cv_queues++;
+    return &cv_queues[num_cv_queues - 1];
+  }
+  return NULL; /* Too many CVs */
+}
+
+/* Add a waiter to the CV queue */
+void cv_add_waiter(pthread_cond_t *cv, int context_id) {
+  CVWaiterQueue *queue = get_cv_queue(cv);
+  if (queue && queue->num_waiters < MAX_WAITERS_PER_CV) {
+    queue->waiters[queue->num_waiters] = context_id;
+    queue->num_waiters++;
+    printDebug("cv+ add_waiter", context_id, queue->num_waiters);
+  }
+}
+
+/* Remove and return the first waiter from the CV queue */
+int cv_remove_waiter(pthread_cond_t *cv) {
+  CVWaiterQueue *queue = get_cv_queue(cv);
+  if (queue && queue->num_waiters > 0) {
+    int waiter = queue->waiters[0];
+    /* Shift remaining waiters */
+    int i;
+    for (i = 0; i < queue->num_waiters - 1; i++) {
+      queue->waiters[i] = queue->waiters[i + 1];
+    }
+    queue->num_waiters--;
+    printDebug("cv- remove_waiter", waiter, queue->num_waiters);
+    return waiter;
+  }
+  return -1; /* No waiters */
+}
+
+/* Remove a specific waiter from the CV queue (for cleanup) */
+void cv_remove_specific_waiter(pthread_cond_t *cv, int context_id) {
+  CVWaiterQueue *queue = get_cv_queue(cv);
+  if (queue) {
+    int i, j;
+    for (i = 0; i < queue->num_waiters; i++) {
+      if (queue->waiters[i] == context_id) {
+        /* Shift remaining waiters */
+        for (j = i; j < queue->num_waiters - 1; j++) {
+          queue->waiters[j] = queue->waiters[j + 1];
+        }
+        queue->num_waiters--;
+        printDebug("cv* remove_specific", context_id, queue->num_waiters);
+        break;
+      }
+    }
+  }
+}
+
+/* Check if there are any waiters on the CV */
+int cv_has_waiters(pthread_cond_t *cv) {
+  CVWaiterQueue *queue = get_cv_queue(cv);
+  return (queue && queue->num_waiters > 0);
+}
+
 void Scheduler_init(void) {
   if (!initializedScheduler) {
     initializedScheduler = 1;
@@ -593,48 +681,46 @@ int pthread_cond_destroy (pthread_cond_t *__cond) {
 
 
 int pthread_cond_signal (pthread_cond_t *__cond) {
-  printDebug("c signal", (int)SPINLOCK-1, 0);
-  if (SPINLOCK != 0) {
-     int waiter = (int)SPINLOCK-1;
+  /* Wake up one waiter from the queue */
+  int waiter = cv_remove_waiter(__cond);
+  printDebug("c signal", waiter, 0);
+  if (waiter >= 0) {
      holdContext(zerotime, waiter);  /* schedules the waiting context */
-     /* Don't clear SPINLOCK here - let the waiter clear it when it exits.
-      * This prevents a race condition where another thread could overwrite
-      * SPINLOCK before the waiter sees it has been signaled. */
      sched_yield();  /* Give the waiter a chance to run */
   }
   return 0;
 }
 
 int pthread_cond_broadcast (pthread_cond_t *__cond) {
-    while (SPINLOCK != 0) {
-        pthread_cond_signal(__cond);
-        sched_yield();
+    /* Wake up all waiters from the queue */
+    printDebug("c broadcast", 0, 0);
+    while (cv_has_waiters(__cond)) {
+        int waiter = cv_remove_waiter(__cond);
+        if (waiter >= 0) {
+            holdContext(zerotime, waiter);
+        }
     }
+    sched_yield();
     return 0;
 }
 
 int pthread_cond_wait (pthread_cond_t *__restrict __cond,
                        pthread_mutex_t *__restrict __mutex) {
-  printDebug("c wait", (int)SPINLOCK, currentCntxt);
+  printDebug("c wait", currentCntxt, 0);
   pthread_mutex_unlock(__mutex);
-  SPINLOCK = (unsigned long long)currentCntxt + 1;  /* Add one for Context=0 */
+  
+  /* Add this context to the waiter queue */
+  cv_add_waiter(__cond, currentCntxt);
   holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
-  /* Only continue looping while SPINLOCK contains our own context ID.
-   * This prevents confusion with other threads' SPINLOCK values and
-   * allows us to exit when signaled (SPINLOCK changed by another thread). */
-  while (SPINLOCK == (unsigned long long)currentCntxt + 1 && !releaseContext()) {
+  
+  /* Wait until signaled (context released) */
+  while (!releaseContext()) {
     sched_yield();
   }
-  /* Clear SPINLOCK only if it still contains our context ID.
-   * This prevents clearing another thread's SPINLOCK value and
-   * ensures proper cleanup of the condition variable state. */
-  if (SPINLOCK == (unsigned long long)currentCntxt + 1) {
-    SPINLOCK = 0;
-  }
+  
   decrWaitingCntxt();
   pthread_mutex_lock(__mutex);
-  /* should there be a sched_yield() here? */
   return 0;
 }
 
