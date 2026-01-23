@@ -40,7 +40,7 @@
 
 char * SIM_CONTEXT_DEBUG = "SIM_CONTEXT_DEBUG";
 
-struct timespec monotonic_time = {0, 1};  /* Start at 1 nanosecond to avoid initialization issues */
+struct timespec monotonic_time = {0, 0};
 const struct timespec zerotime = {0, 0};
 const struct timespec max_time = {MAXLONG, MAXLONG};
 
@@ -72,6 +72,7 @@ int numActiveCntxts = 0;            /* The number of active Cntxts */
    will move time forward to the Cntxt with minimum wait time. */
 int numWaitingCntxts = 0;
 int livelockCounter = 0;            /* Counts consecutive yields without progress */
+int livelockFixed = 0;              /* Set to 1 after first livelock fix to avoid repeated fixes */
 #define LIVELOCK_THRESHOLD 100      /* Max yields before checking for deadlock */
 
 typedef struct {
@@ -86,6 +87,10 @@ void Scheduler_init(void) {
     initializedScheduler = 1;
     debug = getenv(SIM_CONTEXT_DEBUG) != 0;
     if (debug) printf("%i : %s\n", debug, SIM_CONTEXT_DEBUG);
+
+    /* Initialize monotonic time to 1 second to mimic the effect of delay 1.0 */
+    monotonic_time.tv_sec = 1;
+    monotonic_time.tv_nsec = 0;
 
     /* the internal scheduler has an extra active context */
     if (numActiveCntxts == 0) numActiveCntxts = 1;  /* The main program is active */
@@ -276,41 +281,27 @@ void cntxtYield() {
      livelockCounter++;
      if (livelockCounter >= LIVELOCK_THRESHOLD) {
         // We've been switching contexts many times without advancing time
-        // Check if there are any timed waiters we should advance to
-        int nextTimer = findMinWaitingCntxt();
-        printDebug("! LIVELOCK-DET", nextTimer, livelockCounter);
-        if (nextTimer != -1) {
-           if (!lessThan(&cntxtList[nextTimer].wait, &max_time)) {
-              // All waiters have infinite wait time
-              // Force a small time advance to allow synchronization to complete
-              monotonic_time.tv_nsec += 1;
-              if (monotonic_time.tv_nsec >= 1000000000) {
-                 monotonic_time.tv_sec++;
-                 monotonic_time.tv_nsec -= 1000000000;
-              }
-              printDebug("! LIVELOCK-ADVANCE", (int)monotonic_time.tv_sec, (int)monotonic_time.tv_nsec);
-              livelockCounter = 0;
-              // Don't change context, let it continue
-           } else if (lessThan(&monotonic_time, &cntxtList[nextTimer].wait)) {
-              // There's a timed waiter - advance to it
-              monotonic_time = cntxtList[nextTimer].wait;
-              currentCntxt = (size_t)nextTimer;
-              cntxtList[currentCntxt].waiter = 0;
-              cntxtList[currentCntxt].timed_out = 1;
-              printDebug("! LIVELOCK-FIX", (int)currentCntxt, (int)monotonic_time.tv_sec);
-              livelockCounter = 0;
-           }
-        } else {
-           // No waiting contexts found - force a small time advance anyway
-           // This mimics what the delay 1.0 does to initialize the timer
-           monotonic_time.tv_nsec += 1;
-           if (monotonic_time.tv_nsec >= 1000000000) {
-              monotonic_time.tv_sec++;
-              monotonic_time.tv_nsec -= 1000000000;
-           }
-           printDebug("! LIVELOCK-INIT", (int)monotonic_time.tv_sec, (int)monotonic_time.tv_nsec);
-           livelockCounter = 0;
+        // Advance time and wake waiters to break SPINLOCK deadlocks
+        printDebug("! LIVELOCK-ADV", (int)currentCntxt, livelockCounter);
+        
+        // Advance time by a small amount
+        monotonic_time.tv_nsec += 1;
+        if (monotonic_time.tv_nsec >= 1000000000) {
+           monotonic_time.tv_sec++;
+           monotonic_time.tv_nsec -= 1000000000;
         }
+        
+        // Wake up waiting contexts by clearing their waiter flags
+        // This allows pthread_cond_wait to exit via the releaseContext() check
+        int i;
+        for (i = 0; i < numCntxts + 1; i++) {
+           if (cntxtList[i].waiter && !cntxtList[i].finished) {
+              cntxtList[i].waiter = 0;
+           }
+        }
+        
+        // Reset counter
+        livelockCounter = 0;
      }
   } else {
      livelockCounter = 0;  // Reset counter when time advances
@@ -661,7 +652,7 @@ int pthread_cond_signal (pthread_cond_t *__cond) {
   if (SPINLOCK != 0) {
      int waiter = (int)SPINLOCK-1;
      holdContext(zerotime, waiter);  /* schedules the waiting context */
-     cntxtList[waiter].waiter = 1; // Explicitly ensure waiter state
+     cntxtList[waiter].waiter = 1; // Explicitly ensure waiter state  
      SPINLOCK = 0;
   }
   return 0;
@@ -682,7 +673,7 @@ int pthread_cond_wait (pthread_cond_t *__restrict __cond,
   holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
   pthread_mutex_unlock(__mutex);
-  while (SPINLOCK != 0) {
+  while (SPINLOCK != 0 && !releaseContext()) {
     sched_yield();
   }
   decrWaitingCntxt();
