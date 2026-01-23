@@ -40,7 +40,7 @@
 
 char * SIM_CONTEXT_DEBUG = "SIM_CONTEXT_DEBUG";
 
-struct timespec monotonic_time = {0, 0};
+struct timespec monotonic_time = {0, 1};  /* Start at 1 nanosecond to avoid initialization issues */
 const struct timespec zerotime = {0, 0};
 const struct timespec max_time = {MAXLONG, MAXLONG};
 
@@ -71,6 +71,8 @@ int numActiveCntxts = 0;            /* The number of active Cntxts */
 /* The number of waiting Cntxts.  When this equals numActiveCntxts the scheduler
    will move time forward to the Cntxt with minimum wait time. */
 int numWaitingCntxts = 0;
+int livelockCounter = 0;            /* Counts consecutive yields without progress */
+#define LIVELOCK_THRESHOLD 100      /* Max yields before checking for deadlock */
 
 typedef struct {
   void * KA[MAX_THREADS];
@@ -207,6 +209,7 @@ void cntxtYield() {
   size_t lastCntxt = currentCntxt;
   int i;
   int found = 0;
+  struct timespec savedTime = monotonic_time;
 
   // 1. Try to find the next ready task in round-robin fashion
   for (i = 1; i <= numCntxts + 1; i++) {
@@ -228,6 +231,7 @@ void cntxtYield() {
      if (nextTimer != -1 && lessThan(&monotonic_time, &cntxtList[nextTimer].wait)) {
         monotonic_time = cntxtList[nextTimer].wait;
         printDebug("! YIELD-ADV", (int)currentCntxt, (int)monotonic_time.tv_sec);
+        livelockCounter = 0;  // Reset counter when we advance time
         // We stay in the current thread for this slice, or we could switch.
         // Let's switch to be fair.
         currentCntxt = (size_t)nextTimer;
@@ -251,14 +255,67 @@ void cntxtYield() {
     printDebug("! SCHEDULE", (int)currentCntxt, (int)monotonic_time.tv_sec);
     if (cntxtList[currentCntxt].waiter) {
       if (lessThan(&monotonic_time, &cntxtList[currentCntxt].wait)) {
+         // Check if we're trying to advance to max_time (infinite wait)
+         // This indicates a deadlock where all tasks are blocked indefinitely
+         if (!lessThan(&cntxtList[currentCntxt].wait, &max_time)) {
+            printf("EXIT, global deadlock detected (all tasks waiting indefinitely)\n");
+            exit(1);
+         }
          monotonic_time = cntxtList[currentCntxt].wait;
          cntxtList[currentCntxt].timed_out = 1;
+         livelockCounter = 0;  // Reset counter when we advance time
       } else {
          cntxtList[currentCntxt].timed_out = 0;
       }
       cntxtList[currentCntxt].waiter = 0;
     }
   }
+
+  // 4. Detect livelock: if we keep yielding without advancing time
+  if (savedTime.tv_sec == monotonic_time.tv_sec && savedTime.tv_nsec == monotonic_time.tv_nsec) {
+     livelockCounter++;
+     if (livelockCounter >= LIVELOCK_THRESHOLD) {
+        // We've been switching contexts many times without advancing time
+        // Check if there are any timed waiters we should advance to
+        int nextTimer = findMinWaitingCntxt();
+        printDebug("! LIVELOCK-DET", nextTimer, livelockCounter);
+        if (nextTimer != -1) {
+           if (!lessThan(&cntxtList[nextTimer].wait, &max_time)) {
+              // All waiters have infinite wait time
+              // Force a small time advance to allow synchronization to complete
+              monotonic_time.tv_nsec += 1;
+              if (monotonic_time.tv_nsec >= 1000000000) {
+                 monotonic_time.tv_sec++;
+                 monotonic_time.tv_nsec -= 1000000000;
+              }
+              printDebug("! LIVELOCK-ADVANCE", (int)monotonic_time.tv_sec, (int)monotonic_time.tv_nsec);
+              livelockCounter = 0;
+              // Don't change context, let it continue
+           } else if (lessThan(&monotonic_time, &cntxtList[nextTimer].wait)) {
+              // There's a timed waiter - advance to it
+              monotonic_time = cntxtList[nextTimer].wait;
+              currentCntxt = (size_t)nextTimer;
+              cntxtList[currentCntxt].waiter = 0;
+              cntxtList[currentCntxt].timed_out = 1;
+              printDebug("! LIVELOCK-FIX", (int)currentCntxt, (int)monotonic_time.tv_sec);
+              livelockCounter = 0;
+           }
+        } else {
+           // No waiting contexts found - force a small time advance anyway
+           // This mimics what the delay 1.0 does to initialize the timer
+           monotonic_time.tv_nsec += 1;
+           if (monotonic_time.tv_nsec >= 1000000000) {
+              monotonic_time.tv_sec++;
+              monotonic_time.tv_nsec -= 1000000000;
+           }
+           printDebug("! LIVELOCK-INIT", (int)monotonic_time.tv_sec, (int)monotonic_time.tv_nsec);
+           livelockCounter = 0;
+        }
+     }
+  } else {
+     livelockCounter = 0;  // Reset counter when time advances
+  }
+
   printDebug("#sw", (int)lastCntxt, (int)currentCntxt);
 
   if (lastCntxt != currentCntxt) {
