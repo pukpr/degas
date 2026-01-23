@@ -21,7 +21,7 @@
 **  replaced with a simulated version that tracks a monotonic time.
 **
 **  Note: The SunOS and IRIX versions work, but defaults to Linux
-**        Undef the macro desired, or use -D on comand line
+**        Undef the macro desired, or use -D on command line
 **
 **  gcc degas.c -shared -Xlinker -soname=libdegas.so -o libdegas.so
 */
@@ -210,10 +210,6 @@ void Scheduler_init(void) {
   }
   initializedScheduler = 1;
 }
-
-/* optionally prints out debug info */
-void PrintDebug(char * msg, int v1, int v2);
-#define printDebug(A,B,C)  PrintDebug(A,B,C)
 
 /* Creates a new Cntxt, running the function that is passed as argument. */
 size_t spawnCntxt(void (*func) (void *),
