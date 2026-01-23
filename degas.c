@@ -328,7 +328,18 @@ void cntxtYield() {
       monotonic_time = cntxtList[currentCntxt].wait;
       cntxtList[currentCntxt].timed_out = 1;
     }
-    cntxtList[currentCntxt].waiter = 0;
+    /* Only clear waiter flag if this is a timed wait (not max_time).
+     * Contexts waiting on condition variables with max_time should remain
+     * in waiting state until explicitly signaled. Clearing waiter for max_time
+     * waits causes pthread_cond_wait to return prematurely, leading to the
+     * context re-entering the wait and adding itself to the queue multiple times. */
+    if (!lessThan(&cntxtList[currentCntxt].wait, &max_time)) {
+      /* This context is waiting on max_time (indefinite CV wait).
+       * Don't clear waiter flag - it should only be cleared by signal/broadcast. */
+    } else {
+      /* This is a timed wait that has expired. Clear waiter flag. */
+      cntxtList[currentCntxt].waiter = 0;
+    }
   }
   printDebug("#sw", (int)lastCntxt, (int)currentCntxt);
 
@@ -707,11 +718,19 @@ int pthread_cond_broadcast (pthread_cond_t *__cond) {
 int pthread_cond_wait (pthread_cond_t *__restrict __cond,
                        pthread_mutex_t *__restrict __mutex) {
   printDebug("c wait", currentCntxt, 0);
-  pthread_mutex_unlock(__mutex);
   
-  /* Add this context to the waiter queue */
+  /* Add to waiter queue and mark as waiting BEFORE unlocking the mutex.
+   * This ensures atomicity - the context is registered as waiting before
+   * it can be rescheduled by the yield in mutex_unlock.
+   * However, don't increment numWaitingCntxts yet, as that would make
+   * the scheduler think all contexts are sleeping while this context
+   * is still actively executing the mutex_unlock. */
   cv_add_waiter(__cond, currentCntxt);
   holdContext(max_time, currentCntxt);
+  
+  pthread_mutex_unlock(__mutex);
+  
+  /* Now increment the waiting count after the unlock is complete */
   incrWaitingCntxt();
   
   /* Wait until signaled (context released) */
