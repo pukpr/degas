@@ -106,6 +106,9 @@ void Scheduler_init(void) {
     }
     pthread_attr_init(&PAT);
     pthread_attr_setstacksize(&PAT, DEFAULT_STACK_SIZE);
+    
+    /* Initialize context 0 (main thread) to properly save/restore its state */
+    getcontext(&cntxtList[0].context);
   }
   initializedScheduler = 1;
 }
@@ -181,8 +184,8 @@ size_t spawnCntxt(void (*func) (void *),
   cntxtList[numCntxts].arg = arg;
   cntxtList[numCntxts].func = func;
   cntxtList[numCntxts].waiter = 0;
-  cntxtList[numCntxts].wait.tv_sec = 0.0;
-  cntxtList[numCntxts].wait.tv_nsec = 0.0;
+  cntxtList[numCntxts].wait.tv_sec = 0;
+  cntxtList[numCntxts].wait.tv_nsec = 0;
 
   /* Create the context. The context calls CntxtStart( func ). */
   makecontext(&cntxtList[numCntxts].context,
@@ -212,101 +215,20 @@ int findMinWaitingCntxt() {
 
 void cntxtYield() {
   size_t lastCntxt = currentCntxt;
-  int i;
-  int found = 0;
-  struct timespec savedTime = monotonic_time;
 
-  // 1. Try to find the next ready task in round-robin fashion
-  for (i = 1; i <= numCntxts + 1; i++) {
-    size_t next = (lastCntxt + i) % (numCntxts + 1);
-    if (!cntxtList[next].finished) {
-      if (!cntxtList[next].waiter || !lessThan(&monotonic_time, &cntxtList[next].wait)) {
-        currentCntxt = next;
-        cntxtList[next].waiter = 0; // Task is now runnable
-        found = 1;
-        break;
-      }
-    }
-  }
+  do { /*  Round-robin loop */
+    currentCntxt = (currentCntxt + 1) % (numCntxts + 1);
+  } while (cntxtList[currentCntxt].finished);
 
-  // 2. If the only runnable task is the current one, and there are sleepers,
-  //    we advance time to the next event to avoid a livelock.
-  if (found && currentCntxt == lastCntxt) {
-     int nextTimer = findMinWaitingCntxt();
-     if (nextTimer != -1 && lessThan(&monotonic_time, &cntxtList[nextTimer].wait)) {
-        monotonic_time = cntxtList[nextTimer].wait;
-        printDebug("! YIELD-ADV", (int)currentCntxt, (int)monotonic_time.tv_sec);
-        livelockCounter = 0;  // Reset counter when we advance time
-        // We stay in the current thread for this slice, or we could switch.
-        // Let's switch to be fair.
-        currentCntxt = (size_t)nextTimer;
-        cntxtList[currentCntxt].waiter = 0;
-        cntxtList[currentCntxt].timed_out = 1;
-     }
-  }
-
-  // 3. If NO task is ready, we MUST advance time and find a sleeper
-  if (!found) {
-    int nextCntxt = findMinWaitingCntxt();
-    if (nextCntxt == -1) {
-       if (numActiveCntxts > 0) {
-          printf("EXIT, global deadlock detected (no runnable tasks or timers)\n");
-          exit(1);
-       }
-       return; 
-    }
-    currentCntxt = (size_t)nextCntxt;
-    
-    printDebug("! SCHEDULE", (int)currentCntxt, (int)monotonic_time.tv_sec);
+  if (cntxtsAllSleeping()) {
+    currentCntxt = findMinWaitingCntxt();
+    printDebug("! SCHEDULE", currentCntxt, 0);
     if (cntxtList[currentCntxt].waiter) {
-      if (lessThan(&monotonic_time, &cntxtList[currentCntxt].wait)) {
-         // Check if we're trying to advance to max_time (infinite wait)
-         // This indicates a deadlock where all tasks are blocked indefinitely
-         if (!lessThan(&cntxtList[currentCntxt].wait, &max_time)) {
-            printf("EXIT, global deadlock detected (all tasks waiting indefinitely)\n");
-            exit(1);
-         }
-         monotonic_time = cntxtList[currentCntxt].wait;
-         cntxtList[currentCntxt].timed_out = 1;
-         livelockCounter = 0;  // Reset counter when we advance time
-      } else {
-         cntxtList[currentCntxt].timed_out = 0;
-      }
-      cntxtList[currentCntxt].waiter = 0;
+      monotonic_time = cntxtList[currentCntxt].wait;
+      cntxtList[currentCntxt].timed_out = 1;
     }
+    cntxtList[currentCntxt].waiter = 0;
   }
-
-  // 4. Detect livelock: if we keep yielding without advancing time
-  if (savedTime.tv_sec == monotonic_time.tv_sec && savedTime.tv_nsec == monotonic_time.tv_nsec) {
-     livelockCounter++;
-     if (livelockCounter >= LIVELOCK_THRESHOLD) {
-        // We've been switching contexts many times without advancing time
-        // Advance time and wake waiters to break SPINLOCK deadlocks
-        printDebug("! LIVELOCK-ADV", (int)currentCntxt, livelockCounter);
-
-        // Advance time by a small amount
-        monotonic_time.tv_nsec += 1;
-        if (monotonic_time.tv_nsec >= NSEC_PER_SEC) {
-           monotonic_time.tv_sec++;
-           monotonic_time.tv_nsec -= NSEC_PER_SEC;
-        }
-
-        // Wake up waiting contexts by clearing their waiter flags
-        // This allows pthread_cond_wait to exit via the releaseContext() check
-        int i;
-        for (i = 0; i < numCntxts + 1; i++) {
-           if (cntxtList[i].waiter && !cntxtList[i].finished) {
-              cntxtList[i].waiter = 0;
-           }
-        }
-
-        // Reset counter
-        livelockCounter = 0;
-     }
-  } else {
-     livelockCounter = 0;  // Reset counter when time advances
-  }
-
   printDebug("#sw", (int)lastCntxt, (int)currentCntxt);
 
   if (lastCntxt != currentCntxt) {
