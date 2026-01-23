@@ -21,7 +21,7 @@ procedure TL is
    task body NorthSouth is
       My_Light : Color := Green;
    begin
-      accept Start;
+      --accept Start;
       Display_Traffic_State(My_Light, Red);
    end NorthSouth;
 
@@ -35,7 +35,7 @@ procedure TL is
 begin
    Put_Line("Starting Traffic Light Simulation...");
    Put_Line("");
-   NorthSouth.Start;
+   --NorthSouth.Start;
    EastWest.Start;
    
    -- Keep main thread alive so tasks can continue
