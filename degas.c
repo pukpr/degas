@@ -4,6 +4,14 @@
 **  then the scheduler wakes up and dispatches according to a time-based
 **  priority queue.
 **
+**  COMPLETE DETERMINISM: This library provides a simulated clock that is
+**  completely deterministic. Unlike real-time software that depends on the
+**  vagaries of the always-changing system clock, the simulated clock here
+**  always gives the same response for the same sequence of operations. This
+**  ensures reproducible execution traces, making debugging output understandable
+**  and regression tests reliable. Time only advances when the scheduler
+**  explicitly moves it forward - there is no dependency on wall-clock time.
+**
 **  Timers need special care because they could use an absolute or relative
 **  clock.  An env. var. will need to be supplied to set absolute time.
 **  For implementation, we use the main context for the scheduler.
@@ -71,6 +79,9 @@ int numActiveCntxts = 0;            /* The number of active Cntxts */
 /* The number of waiting Cntxts.  When this equals numActiveCntxts the scheduler
    will move time forward to the Cntxt with minimum wait time. */
 int numWaitingCntxts = 0;
+int livelockCounter = 0;            /* Counts consecutive yields without progress */
+#define LIVELOCK_THRESHOLD 100      /* Max yields before checking for deadlock */
+#define NSEC_PER_SEC 1000000000     /* Nanoseconds per second */
 
 typedef struct {
   void * KA[MAX_THREADS];
@@ -79,11 +90,105 @@ typedef struct {
 
 KeyAddress addresses[MAX_THREAD_KEYS];
 
+/* Forward declaration for debug printing */
+void PrintDebug(char * msg, int v1, int v2);
+#define printDebug(A,B,C)  PrintDebug(A,B,C)
+
+/* Waiter queue for condition variables - supports multiple waiters per CV */
+#define MAX_CVS 100
+#define MAX_WAITERS_PER_CV 10
+
+typedef struct {
+  pthread_cond_t *cv_ptr;     /* Pointer to the condition variable */
+  int waiters[MAX_WAITERS_PER_CV]; /* Array of waiting context IDs */
+  int num_waiters;            /* Number of waiters in the queue */
+} CVWaiterQueue;
+
+CVWaiterQueue cv_queues[MAX_CVS];
+int num_cv_queues = 0;
+
+/* Find or create a waiter queue for a condition variable */
+CVWaiterQueue* get_cv_queue(pthread_cond_t *cv) {
+  int i;
+  /* Search for existing queue */
+  for (i = 0; i < num_cv_queues; i++) {
+    if (cv_queues[i].cv_ptr == cv) {
+      return &cv_queues[i];
+    }
+  }
+  /* Create new queue */
+  if (num_cv_queues < MAX_CVS) {
+    cv_queues[num_cv_queues].cv_ptr = cv;
+    cv_queues[num_cv_queues].num_waiters = 0;
+    num_cv_queues++;
+    return &cv_queues[num_cv_queues - 1];
+  }
+  return NULL; /* Too many CVs */
+}
+
+/* Add a waiter to the CV queue */
+void cv_add_waiter(pthread_cond_t *cv, int context_id) {
+  CVWaiterQueue *queue = get_cv_queue(cv);
+  if (queue && queue->num_waiters < MAX_WAITERS_PER_CV) {
+    queue->waiters[queue->num_waiters] = context_id;
+    queue->num_waiters++;
+    printDebug("cv+ add_waiter", context_id, queue->num_waiters);
+  }
+}
+
+/* Remove and return the first waiter from the CV queue */
+int cv_remove_waiter(pthread_cond_t *cv) {
+  CVWaiterQueue *queue = get_cv_queue(cv);
+  if (queue && queue->num_waiters > 0) {
+    int waiter = queue->waiters[0];
+    /* Shift remaining waiters */
+    int i;
+    for (i = 0; i < queue->num_waiters - 1; i++) {
+      queue->waiters[i] = queue->waiters[i + 1];
+    }
+    queue->num_waiters--;
+    printDebug("cv- remove_waiter", waiter, queue->num_waiters);
+    return waiter;
+  }
+  return -1; /* No waiters */
+}
+
+/* Remove a specific waiter from the CV queue (for cleanup) */
+void cv_remove_specific_waiter(pthread_cond_t *cv, int context_id) {
+  CVWaiterQueue *queue = get_cv_queue(cv);
+  if (queue) {
+    int i, j;
+    for (i = 0; i < queue->num_waiters; i++) {
+      if (queue->waiters[i] == context_id) {
+        /* Shift remaining waiters */
+        for (j = i; j < queue->num_waiters - 1; j++) {
+          queue->waiters[j] = queue->waiters[j + 1];
+        }
+        queue->num_waiters--;
+        printDebug("cv* remove_specific", context_id, queue->num_waiters);
+        break;
+      }
+    }
+  }
+}
+
+/* Check if there are any waiters on the CV */
+int cv_has_waiters(pthread_cond_t *cv) {
+  CVWaiterQueue *queue = get_cv_queue(cv);
+  return (queue && queue->num_waiters > 0);
+}
+
 void Scheduler_init(void) {
   if (!initializedScheduler) {
     initializedScheduler = 1;
     debug = getenv(SIM_CONTEXT_DEBUG) != 0;
     if (debug) printf("%i : %s\n", debug, SIM_CONTEXT_DEBUG);
+
+    /* Initialize monotonic time to 1 second to mimic the effect of delay 1.0
+     * This provides a deterministic starting point - the same initial value
+     * every time, ensuring reproducible behavior across all runs. */
+    monotonic_time.tv_sec = 1;
+    monotonic_time.tv_nsec = 0;
 
     /* the internal scheduler has an extra active context */
     if (numActiveCntxts == 0) numActiveCntxts = 1;  /* The main program is active */
@@ -99,6 +204,9 @@ void Scheduler_init(void) {
     }
     pthread_attr_init(&PAT);
     pthread_attr_setstacksize(&PAT, DEFAULT_STACK_SIZE);
+    
+    /* Initialize context 0 (main thread) to properly save/restore its state */
+    getcontext(&cntxtList[0].context);
   }
   initializedScheduler = 1;
 }
@@ -174,8 +282,8 @@ size_t spawnCntxt(void (*func) (void *),
   cntxtList[numCntxts].arg = arg;
   cntxtList[numCntxts].func = func;
   cntxtList[numCntxts].waiter = 0;
-  cntxtList[numCntxts].wait.tv_sec = 0.0;
-  cntxtList[numCntxts].wait.tv_nsec = 0.0;
+  cntxtList[numCntxts].wait.tv_sec = 0;
+  cntxtList[numCntxts].wait.tv_nsec = 0;
 
   /* Create the context. The context calls CntxtStart( func ). */
   makecontext(&cntxtList[numCntxts].context,
@@ -205,59 +313,22 @@ int findMinWaitingCntxt() {
 
 void cntxtYield() {
   size_t lastCntxt = currentCntxt;
-  int i;
-  int found = 0;
 
-  // 1. Try to find the next ready task in round-robin fashion
-  for (i = 1; i <= numCntxts + 1; i++) {
-    size_t next = (lastCntxt + i) % (numCntxts + 1);
-    if (!cntxtList[next].finished) {
-      if (!cntxtList[next].waiter || !lessThan(&monotonic_time, &cntxtList[next].wait)) {
-        currentCntxt = next;
-        cntxtList[next].waiter = 0; // Task is now runnable
-        found = 1;
-        break;
-      }
-    }
-  }
+  do { /*  Round-robin loop */
+    currentCntxt = (currentCntxt + 1) % (numCntxts + 1);
+  } while (cntxtList[currentCntxt].finished);
 
-  // 2. If the only runnable task is the current one, and there are sleepers,
-  //    we advance time to the next event to avoid a livelock.
-  if (found && currentCntxt == lastCntxt) {
-     int nextTimer = findMinWaitingCntxt();
-     if (nextTimer != -1 && lessThan(&monotonic_time, &cntxtList[nextTimer].wait)) {
-        monotonic_time = cntxtList[nextTimer].wait;
-        printDebug("! YIELD-ADV", (int)currentCntxt, (int)monotonic_time.tv_sec);
-        // We stay in the current thread for this slice, or we could switch.
-        // Let's switch to be fair.
-        currentCntxt = (size_t)nextTimer;
-        cntxtList[currentCntxt].waiter = 0;
-        cntxtList[currentCntxt].timed_out = 1;
-     }
-  }
-
-  // 3. If NO task is ready, we MUST advance time and find a sleeper
-  if (!found) {
-    int nextCntxt = findMinWaitingCntxt();
-    if (nextCntxt == -1) {
-       if (numActiveCntxts > 0) {
-          printf("EXIT, global deadlock detected (no runnable tasks or timers)\n");
-          exit(1);
-       }
-       return; 
-    }
-    currentCntxt = (size_t)nextCntxt;
-    
-    printDebug("! SCHEDULE", (int)currentCntxt, (int)monotonic_time.tv_sec);
+  if (cntxtsAllSleeping()) {
+    currentCntxt = findMinWaitingCntxt();
+    printDebug("! SCHEDULE", currentCntxt, 0);
     if (cntxtList[currentCntxt].waiter) {
-      if (lessThan(&monotonic_time, &cntxtList[currentCntxt].wait)) {
-         monotonic_time = cntxtList[currentCntxt].wait;
-         cntxtList[currentCntxt].timed_out = 1;
-      } else {
-         cntxtList[currentCntxt].timed_out = 0;
-      }
-      cntxtList[currentCntxt].waiter = 0;
+      /* Deterministic time advancement: Jump directly to next wakeup time.
+       * This is the key to DEGAS's determinism - time never flows on its own,
+       * it only advances when explicitly set here. Same program = same times. */
+      monotonic_time = cntxtList[currentCntxt].wait;
+      cntxtList[currentCntxt].timed_out = 1;
     }
+    cntxtList[currentCntxt].waiter = 0;
   }
   printDebug("#sw", (int)lastCntxt, (int)currentCntxt);
 
@@ -309,6 +380,13 @@ void decrWaitingCntxt() {
 #elif SUNOS==1
 # define STACKSIZE (int)__attr->__pthread_attrp
 #else
+/* Note: On Linux, pthread_attr_t is opaque, but degas needs to store stack size.
+ * We use the __align field to store the stack size value that we intercept.
+ * The STACKSIZE0 macro (__stacksize) would be correct for real pthread structures,
+ * but since we're intercepting pthread calls, we control our own storage.
+ * Important: pthread_attr_init() must initialize STACKSIZE to 0 to avoid
+ * displaying garbage values (e.g., 2129920) from uninitialized memory.
+ */
 # define STACKSIZE0 __attr->__stacksize
 # define STACKSIZE __attr->__align
 #endif
@@ -422,7 +500,12 @@ int pthread_attr_setschedpolicy (pthread_attr_t *__attr, int __policy) {
 
 int pthread_attr_init (pthread_attr_t *__attr) {
   printDebug("p attrinit", 0, 0);
-//  STACKSIZE = 0;
+  /* Initialize STACKSIZE to 0 to avoid showing garbage values in debug output.
+   * The actual stack size will be set later via pthread_attr_setstacksize().
+   * Without this initialization, __align field contains arbitrary memory values,
+   * causing non-uniform stack sizes in debug output (e.g., 2129920 instead of expected value).
+   */
+  STACKSIZE = 0;
   return 0;
 }
 
@@ -528,14 +611,19 @@ int pthread_mutex_lock (pthread_mutex_t *__mutex) {
     MCOUNT++;
     return 0;
   }
-  incrWaitingCntxt();
-  while (MOWNER != 0) {
-    holdContext(max_time, currentCntxt);
-    sched_yield();
+  /* Only increment waiting count if mutex is actually contended.
+   * This prevents the scheduler from incorrectly thinking all contexts
+   * are sleeping when the mutex is immediately available. */
+  if (MOWNER != 0) {
+    incrWaitingCntxt();
+    while (MOWNER != 0) {
+      holdContext(max_time, currentCntxt);
+      sched_yield();
+    }
+    decrWaitingCntxt();
   }
   MOWNER = (int)currentCntxt + 1; /* Add one for Context=0 */
   MCOUNT = 1;
-  decrWaitingCntxt();
   return 0;
 }
 
@@ -544,13 +632,6 @@ int pthread_mutex_unlock (pthread_mutex_t *__mutex) {
     MCOUNT--;
     if (MCOUNT == 0) {
       MOWNER = 0;
-      // Signal all tasks that might be waiting for the lock
-      int i;
-      for (i=0; i<numCntxts+1; i++) {
-         if (cntxtList[i].waiter && !lessThan(&cntxtList[i].wait, &max_time)) {
-             holdContext(zerotime, i);
-         }
-      }
       /* forced yield to give other threads a chance */
       sched_yield();
     }
@@ -600,43 +681,58 @@ int pthread_cond_destroy (pthread_cond_t *__cond) {
 
 
 int pthread_cond_signal (pthread_cond_t *__cond) {
-  printDebug("c signal", (int)SPINLOCK-1, 0);
-  if (SPINLOCK != 0) {
-     int waiter = (int)SPINLOCK-1;
+  /* Wake up one waiter from the queue */
+  int waiter = cv_remove_waiter(__cond);
+  printDebug("c signal", waiter, 0);
+  if (waiter >= 0) {
      holdContext(zerotime, waiter);  /* schedules the waiting context */
-     cntxtList[waiter].waiter = 1; // Explicitly ensure waiter state
-     SPINLOCK = 0;
+     sched_yield();  /* Give the waiter a chance to run */
   }
   return 0;
 }
 
 int pthread_cond_broadcast (pthread_cond_t *__cond) {
-    while (SPINLOCK != 0) {
-        pthread_cond_signal(__cond);
-        sched_yield();
+    /* Wake up all waiters from the queue */
+    printDebug("c broadcast", 0, 0);
+    while (cv_has_waiters(__cond)) {
+        int waiter = cv_remove_waiter(__cond);
+        if (waiter >= 0) {
+            holdContext(zerotime, waiter);
+        }
     }
+    sched_yield();
     return 0;
 }
 
 int pthread_cond_wait (pthread_cond_t *__restrict __cond,
                        pthread_mutex_t *__restrict __mutex) {
-  printDebug("c wait", (int)SPINLOCK, currentCntxt);
-  SPINLOCK = (unsigned long long)currentCntxt + 1;  /* Add one for Context=0 */
+  printDebug("c wait", currentCntxt, 0);
+  pthread_mutex_unlock(__mutex);
+  
+  /* Add this context to the waiter queue */
+  cv_add_waiter(__cond, currentCntxt);
   holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
-  pthread_mutex_unlock(__mutex);
-  while (SPINLOCK != 0) {
+  
+  /* Wait until signaled (context released) */
+  while (!releaseContext()) {
     sched_yield();
   }
+  
   decrWaitingCntxt();
   pthread_mutex_lock(__mutex);
-  /* should there be a sched_yield() here? */
   return 0;
 }
 
 int pthread_cond_timedwait (pthread_cond_t *__restrict __cond,
                             pthread_mutex_t *__restrict __mutex,
                             __const struct timespec *__restrict __abstime) {
+  /* Note: The timewait debug values show absolute time (accumulated from time=0),
+   * not relative delays. This is correct behavior as per POSIX specification:
+   * pthread_cond_timedwait() takes an absolute time value in __abstime.
+   * The monotonic_time starts at 1 second (see Scheduler_init), so timewait
+   * values accumulate from that point (e.g., 2s, 3s, 4s, etc.).
+   */
   printDebug("c timewait", (int)__abstime->tv_sec, (int)__abstime->tv_nsec);
   cntxtList[getCurrentCntxt()].timed_out = 0;
   holdContext(*__abstime, getCurrentCntxt());
@@ -672,7 +768,11 @@ int gettimeofday (struct timeval *__restrict __tv,
   return 0;
 }
 
-/* More accurate version, but not used on Linux */
+/* More accurate version, but not used on Linux 
+ * Returns the simulated monotonic_time regardless of which clock type is requested.
+ * This ensures complete determinism - the same program always gets the same time values.
+ * Note: Does not distinguish between CLOCK_REALTIME and CLOCK_MONOTONIC, which may
+ * cause issues if Ada runtime expects actual wall-clock time (seconds since epoch). */
 int clock_gettime(clockid_t ct, struct timespec *__tv)
 {
   (__tv)->tv_sec = monotonic_time.tv_sec;
