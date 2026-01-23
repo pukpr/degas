@@ -13,14 +13,17 @@ procedure Simple_Ada_Test is
       accept Start;
       Put_Line ("Worker: Starting");
       Put_Line ("Worker: Finished");
+      delay 1.0;
       accept Done do
          Put_Line ("Worker: In Done accept 1");
       end Done;
       Put_Line ("Worker: After Done accept 1");
+      delay 1.0;
       accept Done do
          Put_Line ("Worker: In Done accept 2");
       end Done;
       Put_Line ("Worker: After Done accept 2" );
+      delay 1.0;
       accept Done do
          Put_Line ("Worker: In Done accept 3");
       end Done;
