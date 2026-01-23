@@ -12,7 +12,6 @@ procedure Simple_Ada_Test is
    begin
       accept Start;
       Put_Line ("Worker: Starting");
-      delay 1.0;
       Put_Line ("Worker: Finished");
       accept Done do
          Put_Line ("Worker: In Done accept 1");
