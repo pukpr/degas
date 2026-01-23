@@ -154,7 +154,7 @@ Where:
 
 **Root Cause**: The GNAT Ada runtime (GNU Ada compiler) uses specific internal constants for representing "very long" or "effectively infinite" timeout values in certain select statement scenarios. The value `633437444.854775807` seconds (approximately 20 years) is one such constant.
 
-When converted to nanoseconds, this equals: **633,437,444,854,775,807 nanoseconds**, which is very close to **2^59.14**.
+When converted to nanoseconds, this equals: **633,437,444,854,775,807 nanoseconds**, which is approximately **2^59.14** (between 2^59 and 2^60).
 
 **PROOF THIS IS NOT SYSTEM CLOCK**: The fact that this exact value appears consistently in every run proves it is NOT reading the system clock. If it were reading actual system time (which would be ~1.7 billion seconds since Unix epoch in 2024), the value would be different every time you run the test. The consistent, unchanging value demonstrates this is a compile-time or runtime constant, not a runtime clock reading.
 
@@ -202,7 +202,7 @@ The deterministic nature of DEGAS ensures that maintenance of regression tests r
 
 2. **Timewait values**: Correctly show absolute time values as per POSIX specification, accumulated from the starting monotonic_time (1 second). This represents when tasks should wake up, not how long they sleep.
 
-3. **Large timewait values**: Values like `633437444 854775807` are GNAT Ada runtime-specific constants (≈2^59.136 nanoseconds or ~20 years) used to represent very long timeouts in certain select statement scenarios. These values are deterministic and reproducible across all runs, demonstrating DEGAS's complete determinism. They are NOT bugs, uninitialized memory, or non-deterministic behavior - they are expected constants from the GNAT implementation.
+3. **Large timewait values**: Values like `633437444 854775807` are GNAT Ada runtime-specific constants (≈2^59.14 nanoseconds or ~20 years) used to represent very long timeouts in certain select statement scenarios. These values are deterministic and reproducible across all runs, demonstrating DEGAS's complete determinism. They are NOT bugs, uninitialized memory, or non-deterministic behavior - they are expected constants from the GNAT implementation.
 
 Both behaviors are now properly documented in the source code with inline comments.
 
