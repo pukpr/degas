@@ -4,6 +4,14 @@
 **  then the scheduler wakes up and dispatches according to a time-based
 **  priority queue.
 **
+**  COMPLETE DETERMINISM: This library provides a simulated clock that is
+**  completely deterministic. Unlike real-time software that depends on the
+**  vagaries of the always-changing system clock, the simulated clock here
+**  always gives the same response for the same sequence of operations. This
+**  ensures reproducible execution traces, making debugging output understandable
+**  and regression tests reliable. Time only advances when the scheduler
+**  explicitly moves it forward - there is no dependency on wall-clock time.
+**
 **  Timers need special care because they could use an absolute or relative
 **  clock.  An env. var. will need to be supplied to set absolute time.
 **  For implementation, we use the main context for the scheduler.
@@ -88,7 +96,9 @@ void Scheduler_init(void) {
     debug = getenv(SIM_CONTEXT_DEBUG) != 0;
     if (debug) printf("%i : %s\n", debug, SIM_CONTEXT_DEBUG);
 
-    /* Initialize monotonic time to 1 second to mimic the effect of delay 1.0 */
+    /* Initialize monotonic time to 1 second to mimic the effect of delay 1.0
+     * This provides a deterministic starting point - the same initial value
+     * every time, ensuring reproducible behavior across all runs. */
     monotonic_time.tv_sec = 1;
     monotonic_time.tv_nsec = 0;
 
@@ -224,6 +234,9 @@ void cntxtYield() {
     currentCntxt = findMinWaitingCntxt();
     printDebug("! SCHEDULE", currentCntxt, 0);
     if (cntxtList[currentCntxt].waiter) {
+      /* Deterministic time advancement: Jump directly to next wakeup time.
+       * This is the key to DEGAS's determinism - time never flows on its own,
+       * it only advances when explicitly set here. Same program = same times. */
       monotonic_time = cntxtList[currentCntxt].wait;
       cntxtList[currentCntxt].timed_out = 1;
     }
@@ -669,7 +682,11 @@ int gettimeofday (struct timeval *__restrict __tv,
   return 0;
 }
 
-/* More accurate version, but not used on Linux */
+/* More accurate version, but not used on Linux 
+ * Returns the simulated monotonic_time regardless of which clock type is requested.
+ * This ensures complete determinism - the same program always gets the same time values.
+ * Note: Does not distinguish between CLOCK_REALTIME and CLOCK_MONOTONIC, which may
+ * cause issues if Ada runtime expects actual wall-clock time (seconds since epoch). */
 int clock_gettime(clockid_t ct, struct timespec *__tv)
 {
   (__tv)->tv_sec = monotonic_time.tv_sec;
