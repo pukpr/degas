@@ -498,14 +498,16 @@ int pthread_mutex_lock (pthread_mutex_t *__mutex) {
     MCOUNT++;
     return 0;
   }
-  incrWaitingCntxt();
-  while (MOWNER != 0) {
-    holdContext(max_time, currentCntxt);
-    sched_yield();
+  if (MOWNER != 0) {
+    incrWaitingCntxt();
+    while (MOWNER != 0) {
+      holdContext(max_time, currentCntxt);
+      sched_yield();
+    }
+    decrWaitingCntxt();
   }
   MOWNER = (int)currentCntxt + 1; /* Add one for Context=0 */
   MCOUNT = 1;
-  decrWaitingCntxt();
   return 0;
 }
 
@@ -567,8 +569,8 @@ int pthread_cond_signal (pthread_cond_t *__cond) {
   if (SPINLOCK != 0) {
      int waiter = (int)SPINLOCK-1;
      holdContext(zerotime, waiter);  /* schedules the waiting context */
-     SPINLOCK = 0;
-     sched_yield();  /* Give the waiter a chance to see SPINLOCK==0 */
+     /* Don't clear SPINLOCK here - let the waiter clear it */
+     sched_yield();  /* Give the waiter a chance to run */
   }
   return 0;
 }
@@ -588,8 +590,12 @@ int pthread_cond_wait (pthread_cond_t *__restrict __cond,
   SPINLOCK = (unsigned long long)currentCntxt + 1;  /* Add one for Context=0 */
   holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
-  while (SPINLOCK != 0 && !releaseContext()) {
+  while (SPINLOCK == (unsigned long long)currentCntxt + 1 && !releaseContext()) {
     sched_yield();
+  }
+  /* Clear SPINLOCK when exiting to prevent stale values */
+  if (SPINLOCK == (unsigned long long)currentCntxt + 1) {
+    SPINLOCK = 0;
   }
   decrWaitingCntxt();
   pthread_mutex_lock(__mutex);
