@@ -313,12 +313,16 @@ int findMinWaitingCntxt() {
 
 void cntxtYield() {
   size_t lastCntxt = currentCntxt;
+  int allSleeping = cntxtsAllSleeping();
 
+  /* Skip finished contexts during round-robin.
+   * Also skip waiting contexts UNLESS all contexts are sleeping. */
   do { /*  Round-robin loop */
     currentCntxt = (currentCntxt + 1) % (numCntxts + 1);
-  } while (cntxtList[currentCntxt].finished);
+  } while (cntxtList[currentCntxt].finished || 
+           (cntxtList[currentCntxt].waiter && !allSleeping));
 
-  if (cntxtsAllSleeping()) {
+  if (allSleeping) {
     currentCntxt = findMinWaitingCntxt();
     printDebug("! SCHEDULE", currentCntxt, 0);
     if (cntxtList[currentCntxt].waiter) {
@@ -707,12 +711,16 @@ int pthread_cond_broadcast (pthread_cond_t *__cond) {
 int pthread_cond_wait (pthread_cond_t *__restrict __cond,
                        pthread_mutex_t *__restrict __mutex) {
   printDebug("c wait", currentCntxt, 0);
-  pthread_mutex_unlock(__mutex);
   
-  /* Add this context to the waiter queue */
+  /* Add this context to the waiter queue BEFORE unlocking the mutex.
+   * This ensures atomicity - the context is registered as waiting before
+   * it can be rescheduled by the yield in mutex_unlock. */
   cv_add_waiter(__cond, currentCntxt);
   holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
+  
+  /* Now unlock the mutex - this may yield but we're already marked as waiting */
+  pthread_mutex_unlock(__mutex);
   
   /* Wait until signaled (context released) */
   while (!releaseContext()) {
