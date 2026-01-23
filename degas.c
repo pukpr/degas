@@ -72,8 +72,8 @@ int numActiveCntxts = 0;            /* The number of active Cntxts */
    will move time forward to the Cntxt with minimum wait time. */
 int numWaitingCntxts = 0;
 int livelockCounter = 0;            /* Counts consecutive yields without progress */
-int livelockFixed = 0;              /* Set to 1 after first livelock fix to avoid repeated fixes */
 #define LIVELOCK_THRESHOLD 100      /* Max yields before checking for deadlock */
+#define NSEC_PER_SEC 1000000000     /* Nanoseconds per second */
 
 typedef struct {
   void * KA[MAX_THREADS];
@@ -283,14 +283,14 @@ void cntxtYield() {
         // We've been switching contexts many times without advancing time
         // Advance time and wake waiters to break SPINLOCK deadlocks
         printDebug("! LIVELOCK-ADV", (int)currentCntxt, livelockCounter);
-        
+
         // Advance time by a small amount
         monotonic_time.tv_nsec += 1;
-        if (monotonic_time.tv_nsec >= 1000000000) {
+        if (monotonic_time.tv_nsec >= NSEC_PER_SEC) {
            monotonic_time.tv_sec++;
-           monotonic_time.tv_nsec -= 1000000000;
+           monotonic_time.tv_nsec -= NSEC_PER_SEC;
         }
-        
+
         // Wake up waiting contexts by clearing their waiter flags
         // This allows pthread_cond_wait to exit via the releaseContext() check
         int i;
@@ -299,7 +299,7 @@ void cntxtYield() {
               cntxtList[i].waiter = 0;
            }
         }
-        
+
         // Reset counter
         livelockCounter = 0;
      }
@@ -652,7 +652,7 @@ int pthread_cond_signal (pthread_cond_t *__cond) {
   if (SPINLOCK != 0) {
      int waiter = (int)SPINLOCK-1;
      holdContext(zerotime, waiter);  /* schedules the waiting context */
-     cntxtList[waiter].waiter = 1; // Explicitly ensure waiter state  
+     cntxtList[waiter].waiter = 1; // Explicitly ensure waiter state
      SPINLOCK = 0;
   }
   return 0;
