@@ -279,6 +279,13 @@ void decrWaitingCntxt() {
 #elif SUNOS==1
 # define STACKSIZE (int)__attr->__pthread_attrp
 #else
+/* Note: On Linux, pthread_attr_t is opaque, but degas needs to store stack size.
+ * We use the __align field to store the stack size value that we intercept.
+ * The STACKSIZE0 macro (__stacksize) would be correct for real pthread structures,
+ * but since we're intercepting pthread calls, we control our own storage.
+ * Important: pthread_attr_init() must initialize STACKSIZE to 0 to avoid
+ * displaying garbage values (e.g., 2129920) from uninitialized memory.
+ */
 # define STACKSIZE0 __attr->__stacksize
 # define STACKSIZE __attr->__align
 #endif
@@ -392,7 +399,12 @@ int pthread_attr_setschedpolicy (pthread_attr_t *__attr, int __policy) {
 
 int pthread_attr_init (pthread_attr_t *__attr) {
   printDebug("p attrinit", 0, 0);
-//  STACKSIZE = 0;
+  /* Initialize STACKSIZE to 0 to avoid showing garbage values in debug output.
+   * The actual stack size will be set later via pthread_attr_setstacksize().
+   * Without this initialization, __align field contains arbitrary memory values,
+   * causing non-uniform stack sizes in debug output (e.g., 2129920 instead of expected value).
+   */
+  STACKSIZE = 0;
   return 0;
 }
 
@@ -616,6 +628,12 @@ int pthread_cond_wait (pthread_cond_t *__restrict __cond,
 int pthread_cond_timedwait (pthread_cond_t *__restrict __cond,
                             pthread_mutex_t *__restrict __mutex,
                             __const struct timespec *__restrict __abstime) {
+  /* Note: The timewait debug values show absolute time (accumulated from time=0),
+   * not relative delays. This is correct behavior as per POSIX specification:
+   * pthread_cond_timedwait() takes an absolute time value in __abstime.
+   * The monotonic_time starts at 1 second (see Scheduler_init), so timewait
+   * values accumulate from that point (e.g., 2s, 3s, 4s, etc.).
+   */
   printDebug("c timewait", (int)__abstime->tv_sec, (int)__abstime->tv_nsec);
   cntxtList[getCurrentCntxt()].timed_out = 0;
   holdContext(*__abstime, getCurrentCntxt());
