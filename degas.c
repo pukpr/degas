@@ -498,6 +498,9 @@ int pthread_mutex_lock (pthread_mutex_t *__mutex) {
     MCOUNT++;
     return 0;
   }
+  /* Only increment waiting count if mutex is actually contended.
+   * This prevents the scheduler from incorrectly thinking all contexts
+   * are sleeping when the mutex is immediately available. */
   if (MOWNER != 0) {
     incrWaitingCntxt();
     while (MOWNER != 0) {
@@ -569,7 +572,9 @@ int pthread_cond_signal (pthread_cond_t *__cond) {
   if (SPINLOCK != 0) {
      int waiter = (int)SPINLOCK-1;
      holdContext(zerotime, waiter);  /* schedules the waiting context */
-     /* Don't clear SPINLOCK here - let the waiter clear it */
+     /* Don't clear SPINLOCK here - let the waiter clear it when it exits.
+      * This prevents a race condition where another thread could overwrite
+      * SPINLOCK before the waiter sees it has been signaled. */
      sched_yield();  /* Give the waiter a chance to run */
   }
   return 0;
@@ -590,10 +595,15 @@ int pthread_cond_wait (pthread_cond_t *__restrict __cond,
   SPINLOCK = (unsigned long long)currentCntxt + 1;  /* Add one for Context=0 */
   holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
+  /* Only continue looping while SPINLOCK contains our own context ID.
+   * This prevents confusion with other threads' SPINLOCK values and
+   * allows us to exit when signaled (SPINLOCK changed by another thread). */
   while (SPINLOCK == (unsigned long long)currentCntxt + 1 && !releaseContext()) {
     sched_yield();
   }
-  /* Clear SPINLOCK when exiting to prevent stale values */
+  /* Clear SPINLOCK only if it still contains our context ID.
+   * This prevents clearing another thread's SPINLOCK value and
+   * ensures proper cleanup of the condition variable state. */
   if (SPINLOCK == (unsigned long long)currentCntxt + 1) {
     SPINLOCK = 0;
   }
