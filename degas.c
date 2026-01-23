@@ -592,13 +592,6 @@ int pthread_mutex_unlock (pthread_mutex_t *__mutex) {
     MCOUNT--;
     if (MCOUNT == 0) {
       MOWNER = 0;
-      // Signal all tasks that might be waiting for the lock
-      int i;
-      for (i=0; i<numCntxts+1; i++) {
-         if (cntxtList[i].waiter && !lessThan(&cntxtList[i].wait, &max_time)) {
-             holdContext(zerotime, i);
-         }
-      }
       /* forced yield to give other threads a chance */
       sched_yield();
     }
@@ -652,7 +645,6 @@ int pthread_cond_signal (pthread_cond_t *__cond) {
   if (SPINLOCK != 0) {
      int waiter = (int)SPINLOCK-1;
      holdContext(zerotime, waiter);  /* schedules the waiting context */
-     cntxtList[waiter].waiter = 1; // Explicitly ensure waiter state
      SPINLOCK = 0;
   }
   return 0;
@@ -669,10 +661,10 @@ int pthread_cond_broadcast (pthread_cond_t *__cond) {
 int pthread_cond_wait (pthread_cond_t *__restrict __cond,
                        pthread_mutex_t *__restrict __mutex) {
   printDebug("c wait", (int)SPINLOCK, currentCntxt);
-  SPINLOCK = (unsigned long long)currentCntxt + 1;  /* Add one for Context=0 */
-  holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
   pthread_mutex_unlock(__mutex);
+  SPINLOCK = (unsigned long long)currentCntxt + 1;  /* Add one for Context=0 */
+  holdContext(max_time, currentCntxt);
   while (SPINLOCK != 0 && !releaseContext()) {
     sched_yield();
   }
