@@ -646,6 +646,7 @@ int pthread_cond_signal (pthread_cond_t *__cond) {
      int waiter = (int)SPINLOCK-1;
      holdContext(zerotime, waiter);  /* schedules the waiting context */
      SPINLOCK = 0;
+     sched_yield();  /* Give the waiter a chance to see SPINLOCK==0 */
   }
   return 0;
 }
@@ -661,10 +662,10 @@ int pthread_cond_broadcast (pthread_cond_t *__cond) {
 int pthread_cond_wait (pthread_cond_t *__restrict __cond,
                        pthread_mutex_t *__restrict __mutex) {
   printDebug("c wait", (int)SPINLOCK, currentCntxt);
-  incrWaitingCntxt();
   pthread_mutex_unlock(__mutex);
   SPINLOCK = (unsigned long long)currentCntxt + 1;  /* Add one for Context=0 */
   holdContext(max_time, currentCntxt);
+  incrWaitingCntxt();
   while (SPINLOCK != 0 && !releaseContext()) {
     sched_yield();
   }
