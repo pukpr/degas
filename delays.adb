@@ -32,7 +32,7 @@ begin
       Text_IO.Put_Line("M" & I'Img);
       delay 2.0;
    end loop;
-
+   delay 5.0;
    Text_IO.Put_Line("M end");
    
 end;
