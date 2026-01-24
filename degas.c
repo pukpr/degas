@@ -57,6 +57,12 @@ const struct timespec max_time = {MAXLONG, MAXLONG};
                       (((l)->tv_sec == (r)->tv_sec) && \
                        ((l)->tv_nsec < (r)->tv_nsec)))
 
+/* Check if a timespec represents an infinite wait (max_time) */
+#define is_infinite_wait(t) ((t)->tv_sec == max_time.tv_sec && (t)->tv_nsec == max_time.tv_nsec)
+
+/* Check if a timespec represents a signaled/immediate wakeup (zerotime) */
+#define is_zerotime(t) ((t)->tv_sec == 0 && (t)->tv_nsec == 0)
+
 static pthread_attr_t PAT;
 
 int debug = 0;
@@ -334,16 +340,15 @@ void cntxtYield() {
     if (minWaiter >= 0 && cntxtList[minWaiter].waiter) {
       struct timespec *waitTime = &cntxtList[minWaiter].wait;
       
-      /* Check if this is NOT an infinite wait (not max_time) */
-      if (waitTime->tv_sec != max_time.tv_sec || 
-          waitTime->tv_nsec != max_time.tv_nsec) {
+      /* Check if this is NOT an infinite wait */
+      if (!is_infinite_wait(waitTime)) {
         /* This is a timed wait or a signaled CV wait (zerotime).
          * Switch to this context and wake it up. */
         printDebug("! SCHEDULE", minWaiter, 0);
         currentCntxt = minWaiter;
         
         /* Advance time for timed waits (but not for zerotime/immediate wakeups) */
-        if (waitTime->tv_sec != 0 || waitTime->tv_nsec != 0) {
+        if (!is_zerotime(waitTime)) {
           monotonic_time = *waitTime;
           cntxtList[currentCntxt].timed_out = 1;
         }
@@ -367,7 +372,7 @@ void cntxtYield() {
    * a context was signaled but allSleeping is false (so the above logic didn't run). */
   if (cntxtList[currentCntxt].waiter) {
     struct timespec *waitTime = &cntxtList[currentCntxt].wait;
-    if (waitTime->tv_sec == 0 && waitTime->tv_nsec == 0) {
+    if (is_zerotime(waitTime)) {
       /* This context was signaled - clear its waiter flag */
       cntxtList[currentCntxt].waiter = 0;
     }
