@@ -32,6 +32,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <ucontext.h>
 #include <pthread.h>
 #include <time.h>
@@ -267,8 +268,12 @@ size_t spawnCntxt(void (*func) (void *),
   }
   /* the 0th cntxt is the main scheduler cntxt */
   numCntxts += 1;
-  /* Add the new function to the end of the Cntxt list */
-  getcontext(&cntxtList[numCntxts].context);
+  
+  /* Initialize the context structure to zero to avoid stale values.
+   * This is critical to prevent stack corruption when makecontext()
+   * is called - we want a clean slate, not values copied from the
+   * current thread's context. */
+  memset(&cntxtList[numCntxts].context, 0, sizeof(ucontext_t));
 
   /* Set the context to a newly allocated stack */
   cntxtList[numCntxts].context.uc_link = 0;
@@ -322,13 +327,30 @@ void cntxtYield() {
     currentCntxt = findMinWaitingCntxt();
     printDebug("! SCHEDULE", currentCntxt, 0);
     if (cntxtList[currentCntxt].waiter) {
-      /* Deterministic time advancement: Jump directly to next wakeup time.
-       * This is the key to DEGAS's determinism - time never flows on its own,
-       * it only advances when explicitly set here. Same program = same times. */
-      monotonic_time = cntxtList[currentCntxt].wait;
-      cntxtList[currentCntxt].timed_out = 1;
+      /* Only wake up contexts with timed waits, not infinite waits (CVs).
+       * Contexts waiting on condition variables have wait time = max_time.
+       * These should only be woken by explicit signals (which set wait time to zerotime).
+       * This prevents contexts from being incorrectly released and re-entering
+       * pthread_cond_wait, which causes them to be added to the waiter queue
+       * multiple times. */
+      struct timespec *waitTime = &cntxtList[currentCntxt].wait;
+      if (waitTime->tv_sec == max_time.tv_sec && waitTime->tv_nsec == max_time.tv_nsec) {
+        /* This context is waiting forever (on a CV). Don't wake it up.
+         * This is a deadlock condition - all contexts are waiting on CVs
+         * and none can make progress. */ 
+        printDebug("! DEADLOCK - all contexts waiting on CVs", currentCntxt, 0);
+        /* Don't clear waiter flag - keep context waiting */
+      } else {
+        /* This is either a timed wait that has expired, or a CV wait that
+         * was signaled (wait time set to zerotime). Wake it up. */
+        /* Deterministic time advancement: Jump directly to next wakeup time.
+         * This is the key to DEGAS's determinism - time never flows on its own,
+         * it only advances when explicitly set here. Same program = same times. */
+        monotonic_time = *waitTime;
+        cntxtList[currentCntxt].timed_out = 1;
+        cntxtList[currentCntxt].waiter = 0;
+      }
     }
-    cntxtList[currentCntxt].waiter = 0;
   }
   printDebug("#sw", (int)lastCntxt, (int)currentCntxt);
 
