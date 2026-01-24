@@ -318,60 +318,47 @@ int findMinWaitingCntxt() {
 void cntxtYield() {
   size_t lastCntxt = currentCntxt;
   
-  /* Round-robin: skip only finished contexts.
-   * All contexts (including waiters) get scheduled and can check their conditions. */
+  /* Check if all contexts are sleeping */
+  int allSleeping = cntxtsAllSleeping();
+  printDebug("$ yield", numWaitingCntxts, numActiveCntxts);
+
+  /* Round-robin: skip only finished contexts, not waiters.
+   * Waiters (mutex and CV) will get scheduled and can check their conditions. */
   do {
     currentCntxt = (currentCntxt + 1) % (numCntxts + 1);
   } while (cntxtList[currentCntxt].finished);
 
-  /* Check if all contexts are sleeping */
-  int allSleeping = cntxtsAllSleeping();
-
-  /* If all contexts are sleeping, find the one with minimum wait time and try to wake it */
+  /* If all contexts are sleeping, find the one with minimum wait time */
   if (allSleeping) {
-    int minWaiter = findMinWaitingCntxt();
+    currentCntxt = findMinWaitingCntxt();
+    printDebug("! SCHEDULE", currentCntxt, 0);
     
-    if (minWaiter >= 0 && cntxtList[minWaiter].waiter) {
-      struct timespec *waitTime = &cntxtList[minWaiter].wait;
-      
-      /* Check if this is NOT an infinite wait (not max_time) */
-      if (waitTime->tv_sec != max_time.tv_sec || 
-          waitTime->tv_nsec != max_time.tv_nsec) {
-        /* This is a timed wait or a signaled CV wait (zerotime).
-         * Switch to this context and wake it up. */
-        printDebug("! SCHEDULE", minWaiter, 0);
-        currentCntxt = minWaiter;
-        
-        /* Advance time for timed waits (but not for zerotime/immediate wakeups) */
+    if (currentCntxt >= 0 && cntxtList[currentCntxt].waiter) {
+      struct timespec *waitTime = &cntxtList[currentCntxt].wait;
+      /* Check if this is an infinite wait (max_time) */
+      if (waitTime->tv_sec == max_time.tv_sec && 
+          waitTime->tv_nsec == max_time.tv_nsec) {
+        /* This is an unsignaled CV wait or mutex wait.
+         * Do NOT clear the waiter flag - this would cause the CV wait to return prematurely.
+         * Instead, just do a round-robin to give other contexts a chance.
+         * Mutex waiters will get scheduled via round-robin and can retry. */
+        printDebug("! DEADLOCK", currentCntxt, 0);
+        /* Note: In a real system, this would be a deadlock. But we'll let it cycle
+         * in case there are mutex waiters that can make progress. */
+      } else {
+        /* Timed wait or signaled CV wait (zerotime) - clear waiter flag to wake it */
         if (waitTime->tv_sec != 0 || waitTime->tv_nsec != 0) {
+          /* Timed wait - advance monotonic time to the wakeup time */
           monotonic_time = *waitTime;
           cntxtList[currentCntxt].timed_out = 1;
         }
-        /* Clear the waiter flag to wake the context */
+        /* Clear the waiter flag to allow the context to proceed */
         cntxtList[currentCntxt].waiter = 0;
-      } else {
-        /* All waiting contexts have infinite waits (max_time).
-         * These are unsignaled CV waits or mutex waits.
-         * Continue with the round-robin choice - don't override currentCntxt.
-         * Mutex waiters will get to run and retry their locks.
-         * CV waiters will run but immediately re-enter their wait loops. */
-        printDebug("! MAX_WAIT", minWaiter, 0);
       }
     }
   }
   
   printDebug("#sw", (int)lastCntxt, (int)currentCntxt);
-
-  /* Before switching, check if the target context was signaled (zerotime wait).
-   * If so, clear its waiter flag to wake it up. This handles the case where
-   * a context was signaled but allSleeping is false (so the above logic didn't run). */
-  if (cntxtList[currentCntxt].waiter) {
-    struct timespec *waitTime = &cntxtList[currentCntxt].wait;
-    if (waitTime->tv_sec == 0 && waitTime->tv_nsec == 0) {
-      /* This context was signaled - clear its waiter flag */
-      cntxtList[currentCntxt].waiter = 0;
-    }
-  }
 
   if (lastCntxt != currentCntxt) {
      swapcontext(&cntxtList[lastCntxt].context,
@@ -656,12 +643,15 @@ int pthread_mutex_lock (pthread_mutex_t *__mutex) {
    * This prevents the scheduler from incorrectly thinking all contexts
    * are sleeping when the mutex is immediately available. */
   if (MOWNER != 0) {
+    printDebug("m wait start", MOWNER, currentCntxt);
     incrWaitingCntxt();
     while (MOWNER != 0) {
       holdContext(max_time, currentCntxt);
       sched_yield();
+      printDebug("m wait retry", MOWNER, currentCntxt);
     }
     decrWaitingCntxt();
+    printDebug("m wait end", MOWNER, currentCntxt);
   }
   MOWNER = (int)currentCntxt + 1; /* Add one for Context=0 */
   MCOUNT = 1;
