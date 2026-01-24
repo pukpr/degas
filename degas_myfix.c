@@ -57,12 +57,6 @@ const struct timespec max_time = {MAXLONG, MAXLONG};
                       (((l)->tv_sec == (r)->tv_sec) && \
                        ((l)->tv_nsec < (r)->tv_nsec)))
 
-/* Check if a timespec represents an infinite wait (max_time) */
-#define is_infinite_wait(t) ((t)->tv_sec == max_time.tv_sec && (t)->tv_nsec == max_time.tv_nsec)
-
-/* Check if a timespec represents a signaled/immediate wakeup (zerotime) */
-#define is_zerotime(t) ((t)->tv_sec == 0 && (t)->tv_nsec == 0)
-
 static pthread_attr_t PAT;
 
 int debug = 0;
@@ -324,60 +318,47 @@ int findMinWaitingCntxt() {
 void cntxtYield() {
   size_t lastCntxt = currentCntxt;
   
-  /* Round-robin: skip only finished contexts.
-   * All contexts (including waiters) get scheduled and can check their conditions. */
+  /* Check if all contexts are sleeping */
+  int allSleeping = cntxtsAllSleeping();
+  printDebug("$ yield", numWaitingCntxts, numActiveCntxts);
+
+  /* Round-robin: skip only finished contexts, not waiters.
+   * Waiters (mutex and CV) will get scheduled and can check their conditions. */
   do {
     currentCntxt = (currentCntxt + 1) % (numCntxts + 1);
   } while (cntxtList[currentCntxt].finished);
 
-  /* Check if all contexts are sleeping */
-  int allSleeping = cntxtsAllSleeping();
-
-  /* If all contexts are sleeping, find the one with minimum wait time and try to wake it */
+  /* If all contexts are sleeping, find the one with minimum wait time */
   if (allSleeping) {
-    int minWaiter = findMinWaitingCntxt();
+    currentCntxt = findMinWaitingCntxt();
+    printDebug("! SCHEDULE", currentCntxt, 0);
     
-    if (minWaiter >= 0 && cntxtList[minWaiter].waiter) {
-      struct timespec *waitTime = &cntxtList[minWaiter].wait;
-      
-      /* Check if this is NOT an infinite wait (i.e., not a mutex wait or unsignaled CV wait).
-       * Infinite waits have max_time and should only be woken by explicit signals. */
-      if (!is_infinite_wait(waitTime)) {
-        /* This is a timed wait or a signaled CV wait (zerotime).
-         * Switch to this context and wake it up. */
-        printDebug("! SCHEDULE", minWaiter, 0);
-        currentCntxt = minWaiter;
-        
-        /* Advance time for timed waits (but not for zerotime/immediate wakeups) */
-        if (!is_zerotime(waitTime)) {
+    if (currentCntxt >= 0 && cntxtList[currentCntxt].waiter) {
+      struct timespec *waitTime = &cntxtList[currentCntxt].wait;
+      /* Check if this is an infinite wait (max_time) */
+      if (waitTime->tv_sec == max_time.tv_sec && 
+          waitTime->tv_nsec == max_time.tv_nsec) {
+        /* This is an unsignaled CV wait or mutex wait.
+         * Do NOT clear the waiter flag - this would cause the CV wait to return prematurely.
+         * Instead, just do a round-robin to give other contexts a chance.
+         * Mutex waiters will get scheduled via round-robin and can retry. */
+        printDebug("! DEADLOCK", currentCntxt, 0);
+        /* Note: In a real system, this would be a deadlock. But we'll let it cycle
+         * in case there are mutex waiters that can make progress. */
+      } else {
+        /* Timed wait or signaled CV wait (zerotime) - clear waiter flag to wake it */
+        if (waitTime->tv_sec != 0 || waitTime->tv_nsec != 0) {
+          /* Timed wait - advance monotonic time to the wakeup time */
           monotonic_time = *waitTime;
           cntxtList[currentCntxt].timed_out = 1;
         }
-        /* Clear the waiter flag to wake the context */
+        /* Clear the waiter flag to allow the context to proceed */
         cntxtList[currentCntxt].waiter = 0;
-      } else {
-        /* All waiting contexts have infinite waits (max_time).
-         * These are unsignaled CV waits or mutex waits.
-         * Continue with the round-robin choice - don't override currentCntxt.
-         * Mutex waiters will get to run and retry their locks.
-         * CV waiters will run but immediately re-enter their wait loops. */
-        printDebug("! MAX_WAIT", minWaiter, 0);
       }
     }
   }
   
   printDebug("#sw", (int)lastCntxt, (int)currentCntxt);
-
-  /* Before switching, check if the target context was signaled (zerotime wait).
-   * If so, clear its waiter flag to wake it up. This handles the case where
-   * a context was signaled but allSleeping is false (so the above logic didn't run). */
-  if (cntxtList[currentCntxt].waiter) {
-    struct timespec *waitTime = &cntxtList[currentCntxt].wait;
-    if (is_zerotime(waitTime)) {
-      /* This context was signaled - clear its waiter flag */
-      cntxtList[currentCntxt].waiter = 0;
-    }
-  }
 
   if (lastCntxt != currentCntxt) {
      swapcontext(&cntxtList[lastCntxt].context,
@@ -662,12 +643,15 @@ int pthread_mutex_lock (pthread_mutex_t *__mutex) {
    * This prevents the scheduler from incorrectly thinking all contexts
    * are sleeping when the mutex is immediately available. */
   if (MOWNER != 0) {
+    printDebug("m wait start", MOWNER, currentCntxt);
     incrWaitingCntxt();
     while (MOWNER != 0) {
       holdContext(max_time, currentCntxt);
       sched_yield();
+      printDebug("m wait retry", MOWNER, currentCntxt);
     }
     decrWaitingCntxt();
+    printDebug("m wait end", MOWNER, currentCntxt);
   }
   MOWNER = (int)currentCntxt + 1; /* Add one for Context=0 */
   MCOUNT = 1;
@@ -756,12 +740,11 @@ int pthread_cond_wait (pthread_cond_t *__restrict __cond,
   printDebug("c wait", currentCntxt, 0);
   
   /* Add this context to the waiter queue BEFORE unlocking the mutex.
-   * This ensures atomicity as required by POSIX pthread_cond_wait semantics.
-   * The context must be marked as waiting before the unlock can trigger a
-   * yield that might reschedule this context. Without this ordering, the
-   * context could be rescheduled between unlock and adding to the queue,
-   * causing it to re-enter this function and be added to the waiter queue
-   * multiple times. */
+   * This ensures atomicity - the context is marked as waiting before
+   * the unlock can trigger a yield that might reschedule this context.
+   * Without this ordering, the context could be rescheduled between
+   * unlock and adding to the queue, causing it to re-enter this function
+   * and be added to the waiter queue multiple times. */
   cv_add_waiter(__cond, currentCntxt);
   holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
