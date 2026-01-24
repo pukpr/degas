@@ -340,7 +340,8 @@ void cntxtYield() {
     if (minWaiter >= 0 && cntxtList[minWaiter].waiter) {
       struct timespec *waitTime = &cntxtList[minWaiter].wait;
       
-      /* Check if this is NOT an infinite wait */
+      /* Check if this is NOT an infinite wait (i.e., not a mutex wait or unsignaled CV wait).
+       * Infinite waits have max_time and should only be woken by explicit signals. */
       if (!is_infinite_wait(waitTime)) {
         /* This is a timed wait or a signaled CV wait (zerotime).
          * Switch to this context and wake it up. */
@@ -755,11 +756,12 @@ int pthread_cond_wait (pthread_cond_t *__restrict __cond,
   printDebug("c wait", currentCntxt, 0);
   
   /* Add this context to the waiter queue BEFORE unlocking the mutex.
-   * This ensures atomicity - the context is marked as waiting before
-   * the unlock can trigger a yield that might reschedule this context.
-   * Without this ordering, the context could be rescheduled between
-   * unlock and adding to the queue, causing it to re-enter this function
-   * and be added to the waiter queue multiple times. */
+   * This ensures atomicity as required by POSIX pthread_cond_wait semantics.
+   * The context must be marked as waiting before the unlock can trigger a
+   * yield that might reschedule this context. Without this ordering, the
+   * context could be rescheduled between unlock and adding to the queue,
+   * causing it to re-enter this function and be added to the waiter queue
+   * multiple times. */
   cv_add_waiter(__cond, currentCntxt);
   holdContext(max_time, currentCntxt);
   incrWaitingCntxt();
