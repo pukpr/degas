@@ -1,7 +1,9 @@
 #!/bin/bash
 
+gnatmake -D obj simple_ada_test.adb
+
 # Run the test and capture output
-OUTPUT=$(LD_PRELOAD=./Linux/libdegas.so ./simple_ada_test 2>&1)
+OUTPUT=$(LD_PRELOAD=../Linux/libdegas.so ./simple_ada_test 2>&1)
 
 # Expected output
 EXPECTED="0 : SIM_CONTEXT_DEBUG
