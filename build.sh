@@ -1,3 +1,3 @@
 gcc degas.c -shared -fPIC -DLINUX=1 -o Linux/libdegas.so
-gnatmake -D Linux simple_ada_test
+
 

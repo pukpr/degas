@@ -4,6 +4,4 @@
 # Ada Library Information
 *.ali
 
-# Test binaries
-test_scheduler
-test_tl_scenario
+
