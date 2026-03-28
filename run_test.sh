@@ -4,7 +4,8 @@
 OUTPUT=$(LD_PRELOAD=./Linux/libdegas.so ./simple_ada_test 2>&1)
 
 # Expected output
-EXPECTED="Main: Starting simple Ada test with DEGAS
+EXPECTED="0 : SIM_CONTEXT_DEBUG
+Main: Starting simple Ada test with DEGAS
 Worker: Starting
 Worker: Finished
 Worker: In Done accept 1
@@ -19,7 +20,13 @@ Worker: In Done accept 5
 Worker: After Done accept 5
 Worker: In Done accept 6
 Worker: After Done accept 6
-Main: Test completed"
+Main: Test completed
+
+--- FINAL CONTEXT STATUS ---
+Monotonic Time: 3.010000000
+Active: 1, Waiting: 0
+Context 0: finished=0 waiter=0 wait=0.000000000
+Context 1: finished=1 waiter=0 wait=0.000000000"
 
 # Display the output
 echo "$OUTPUT"
