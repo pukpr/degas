@@ -503,6 +503,7 @@ pthread_t pthread_self (void) {
 
 void pthread_exit (void *__retval) {
   printDebug("p exit", 0, 0);
+  exit(0);
 }
 
 /*************************************************************
