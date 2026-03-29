@@ -65,4 +65,15 @@ output byte-for-byte against a known-good expected string.
 | `s1.adb` | Single-task variant of `s.adb`; isolates the `Event.Suspend` / `Event.Signal` protected-entry pair. |
 | `traffic_light.adb` | North-South / East-West traffic light simulation using two tasks and entry-based phase switching; visual ASCII output. |
 
+## Examples
+    
+### Tetris
+A soft real-time version of Tetris implemented in Ada. This example demonstrates how the DEGAS replacement Ada runtime can be used for high-speed, deterministic regression testing.
+    
+- **dtetris**: Interactive version of the game.
+- **ttetris**: Automated testing version.
+    
+Check out the accompanying video demonstration showing the speed-up and deterministic evaluation achieved with DEGAS:
+[DEGAS Tetris Regression Testing Demo](docs/comparison_audio.mp4)
+
 
