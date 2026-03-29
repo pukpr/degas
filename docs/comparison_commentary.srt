@@ -1,0 +1,39 @@
+1
+00:00:00,500 --> 00:00:05,000
+Welcome to this demonstration of Tetris in Ada, showcasing the DEGAS replacement runtime for regression testing.
+
+2
+00:00:05,500 --> 00:00:10,000
+While dtetris provides an interactive experience, ttetris is specifically designed for automated testing.
+
+3
+00:00:10,500 --> 00:00:15,000
+We start with ttetris running under the standard Ada runtime. Notice the slow, real-time progression.
+
+4
+00:00:15,500 --> 00:00:20,000
+The game relies on wall-clock time for task scheduling and delays, which can be inefficient for testing.
+
+5
+00:00:20,500 --> 00:00:25,000
+Now, we switch to the DEGAS runtime. DEGAS enables high-speed testing by replacing wall-clock time with simulated time.
+
+6
+00:00:25,500 --> 00:00:30,000
+By intercepting pthread calls via LD_PRELOAD, DEGAS eliminates real-world waiting from Ada delay calls.
+
+7
+00:00:30,500 --> 00:00:35,000
+The result is instantaneous evaluation. This allows us to run complex test suites in a fraction of the time.
+
+8
+00:00:35,500 --> 00:00:40,000
+Beyond speed, DEGAS provides a deterministic and reproducible event order, ensuring that test results remain consistent.
+
+9
+00:00:40,500 --> 00:00:45,000
+Finally, we see ttetris running again without DEGAS. Observe the non-determinism as the results differ each time.
+
+10
+00:00:45,500 --> 00:00:50,000
+This variability makes regression testing unreliable. With DEGAS, we gain both speed and total reproducibility.
