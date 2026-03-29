@@ -1,6 +1,8 @@
+<img width="640" height="184" alt="image" src="https://github.com/user-attachments/assets/c8bf06c8-a9fd-4a80-9f0f-a42db3c1cfa0" />
+
 # DEGAS — Discrete-Event GNAT Ada Simulator
 
-Read `degas.pdf` for full background.
+Read [`degas.pdf`](docs/degas.pdf) for full background (and [`ada15--degas.pdf`](docs/ada15-degas.pdf) ).
 
 ## How it works
 
@@ -11,8 +13,7 @@ entire program runs instantaneously while preserving a deterministic,
 reproducible event order.
 
 `degas.c` was written for an older `glibc` that used spinlocks; modern
-`glibc` uses futexes, so `degas.c` is a design reference rather than a
-drop-in replacement.
+`glibc` uses futexes, so the newest version of `degas.c` has adapted both for pthreads as well as for the GNAT Ada GNARL tasking runtime. .
 
 ---
 
