@@ -76,4 +76,8 @@ A soft real-time version of Tetris implemented in Ada. This example demonstrates
 Check out the accompanying video demonstration showing the speed-up and deterministic evaluation achieved with DEGAS:
 [DEGAS Tetris Regression Testing Demo](docs/comparison_audio.mp4)
 
+https://github.com/pukpr/degas/raw/refs/heads/main/docs/comparison_audio.mp4
+
+
+
 
